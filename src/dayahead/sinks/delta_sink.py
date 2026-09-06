@@ -4,6 +4,12 @@ Se usa MERGE en vez de append para que una recarga del mismo dia actualice en
 sitio en lugar de duplicar: ENTSO-E revisa precios y el bloque semanal de SMARD
 se solapa con la ejecucion anterior, asi que el pipeline se ejecuta tantas
 veces como haga falta con el mismo resultado.
+
+El esquema se declara de forma EXPLICITA, nunca se deja inferir. En los paises
+que ya publican en euros `fx_rate` es nulo en todas las filas, y Spark no puede
+deducir el tipo de una columna enteramente nula: falla con CANNOT_DETERMINE_TYPE.
+Declararlo ademas garantiza que las cuatro tablas tengan tipos identicos, que es
+lo que permite unirlas en la capa de lectura sin conversiones.
 """
 from __future__ import annotations
 
@@ -18,6 +24,31 @@ log = logging.getLogger(__name__)
 _MERGE_KEYS = ["country_code", "ts_utc", "resolution"]
 
 
+def price_schema():
+    """StructType de la tabla, en el mismo orden que models.COLUMNS."""
+    from pyspark.sql.types import (
+        DateType, DoubleType, StringType, StructField, StructType, TimestampType,
+    )
+
+    fields = {
+        "country_code": (StringType(), False),
+        "bidding_zone": (StringType(), True),
+        "ts_utc": (TimestampType(), False),
+        "ts_local": (TimestampType(), False),
+        "delivery_date": (DateType(), False),
+        "resolution": (StringType(), False),
+        "price_original": (DoubleType(), True),
+        "currency_original": (StringType(), True),
+        "price_eur": (DoubleType(), True),
+        "fx_rate": (DoubleType(), True),          # nulo en ES, RO y DE
+        "source": (StringType(), True),
+        "ingested_at_utc": (TimestampType(), True),
+    }
+    if set(fields) != set(COLUMNS):
+        raise RuntimeError("El esquema Delta y models.COLUMNS se han desincronizado")
+    return StructType([StructField(name, *fields[name]) for name in COLUMNS])
+
+
 class DeltaSink(Sink):
     def __init__(self, spark, schema: str = "dbo"):
         self.spark = spark
@@ -29,7 +60,10 @@ class DeltaSink(Sink):
         from delta.tables import DeltaTable
 
         full = f"{self.schema}.{table}"
-        df = self.spark.createDataFrame([p.as_row() for p in points]).select(*COLUMNS)
+        # Tuplas en el orden de COLUMNS + esquema explicito: sin inferencia y sin
+        # depender del orden de las claves del diccionario.
+        rows = [tuple(p.as_row()[c] for c in COLUMNS) for p in points]
+        df = self.spark.createDataFrame(rows, schema=price_schema())
         df = df.repartition("delivery_date")
 
         if not self.spark.catalog.tableExists(full):
@@ -37,8 +71,8 @@ class DeltaSink(Sink):
                .partitionBy("delivery_date")
                .mode("overwrite")
                .saveAsTable(full))
-            log.info("Creada %s con %s filas", full, df.count())
-            return df.count()
+            log.info("Creada %s con %s filas", full, len(points))
+            return len(points)
 
         condition = " AND ".join(f"t.{k} = s.{k}" for k in _MERGE_KEYS)
         (DeltaTable.forName(self.spark, full).alias("t")

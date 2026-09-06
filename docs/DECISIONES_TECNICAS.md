@@ -156,7 +156,30 @@ porque la API estaba caída se completa en la siguiente ejecución, sin
 intervención manual y sin duplicar ni una fila. ENTSO-E además revisa precios
 publicados, y el `MERGE` los actualiza en sitio.
 
-### 4.4 Aislamiento de fallos
+### 4.4 El esquema Delta se declara, no se infiere
+
+La primera versión dejaba que Spark infiriese el esquema al crear el DataFrame.
+Funcionaba con Polonia y fallaba con España, Rumanía y Alemania:
+
+```
+[CANNOT_DETERMINE_TYPE] Some of types cannot be determined after inferring.
+```
+
+La causa es `fx_rate`. En los mercados que ya publican en euros esa columna es
+nula en **todas** las filas, y Spark no puede deducir el tipo de una columna
+enteramente nula. En Polonia no ocurría porque ahí sí lleva el tipo de cambio
+aplicado.
+
+Se declara por tanto un `StructType` explícito. Además de resolver el fallo,
+garantiza que las cuatro tablas tengan exactamente los mismos tipos, que es lo
+que permite unirlas en la capa de lectura sin conversiones, y evita que un día
+con datos atípicos cambie el tipo de una columna sin avisar.
+
+El caso está cubierto por `tests/test_delta_schema.py`, que reproduce la
+inferencia fallida y valida las filas contra el esquema sin necesidad de
+levantar una sesión de Spark.
+
+### 4.5 Aislamiento de fallos
 
 Cada país se ingesta dentro de su propio `try`. Que ENTSO-E esté caído no puede
 impedir que se cargue Alemania. Los fallos se acumulan, se reportan juntos al
@@ -166,7 +189,7 @@ cargado todo lo que sí estaba disponible.
 Sobre esto, `HttpClient` reintenta con *backoff* exponencial ante 429 y 5xx,
 que son los errores transitorios típicos de estas APIs públicas.
 
-### 4.5 Calidad del dato como parte del pipeline
+### 4.6 Calidad del dato como parte del pipeline
 
 El enunciado pide carga *"sin huecos"*, así que la detección de huecos no es un
 extra: cada ejecución compara los puntos recibidos con los esperados por día
@@ -174,7 +197,7 @@ extra: cada ejecución compara los puntos recibidos con los esperados por día
 `etl_run_log`. Con `--fail-on-gaps` el proceso termina en error, para poder
 enganchar una alerta en el pipeline.
 
-### 4.6 Por qué una tabla por país
+### 4.7 Por qué una tabla por país
 
 Lo pide el enunciado, y además tiene sentido operativo: aísla los reprocesos
 (recargar Polonia no toca España), permite políticas de retención distintas y

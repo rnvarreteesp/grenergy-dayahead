@@ -116,7 +116,7 @@ src/dayahead/
 src/api/                       FastAPI: main, security, repository, schemas
 web/index.html                 Interfaz de comparación (Chart.js)
 fabric/                        Notebook, definición del pipeline y guía de despliegue
-tests/                         21 tests sin acceso a red
+tests/                         27 tests sin acceso a red
 docs/DECISIONES_TECNICAS.md    Justificación de las decisiones de diseño
 ```
 
@@ -274,7 +274,7 @@ ejecuta y se testea en local. Lo único que cambia entre local y Fabric es el
 pytest
 ```
 
-21 tests, sin acceso a red (las respuestas de las APIs están simuladas). Cubren
+27 tests, sin acceso a red (las respuestas de las APIs están simuladas). Cubren
 lo que de verdad puede romperse:
 
 - ENTSO-E: descarte de subastas intradiarias, relleno de la curva dispersa,
@@ -284,6 +284,8 @@ lo que de verdad puede romperse:
 - Cambio de hora: 92 / 96 / 100 puntos según el día.
 - Tipo de cambio: arrastre del último día hábil en fines de semana.
 - Escritura: recargar el mismo día actualiza en sitio y no duplica.
+- Esquema Delta: `fx_rate` es nulo en ES/RO/DE, y se comprueba que el esquema
+  explícito lo admite (los tests de Spark se saltan solos si no hay pyspark).
 
 ---
 
