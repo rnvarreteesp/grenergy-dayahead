@@ -266,6 +266,26 @@ El notebook **no duplica lógica**: importa el mismo paquete `dayahead` que se
 ejecuta y se testea en local. Lo único que cambia entre local y Fabric es el
 *sink* (`DuckDBSink` ↔ `DeltaSink`).
 
+### Evidencias del despliegue
+
+Tablas generadas en el Lakehouse `lh_energy_markets` — una por país más la
+tabla de traza de ejecuciones:
+
+![Tablas en el Lakehouse](docs/img/01-lakehouse-tablas.png)
+
+Ejecución del pipeline `pl_dayahead_daily`, que orquesta el notebook de ingesta:
+
+![Pipeline ejecutado correctamente](docs/img/03-pipeline-ejecucion-correcta.png)
+
+Programación diaria a las 14:30 CET — después de la casación de la subasta
+Day Ahead (13:00 CET) y del fixing PLN/EUR del BCE (14:15 CET):
+
+![Programación diaria del pipeline](docs/img/04-pipeline-programacion-diaria.png)
+
+Cada ejecución registra además una fila en `dbo.etl_run_log` con la ventana
+procesada, las filas escritas por país y los días que quedaron incompletos, de
+modo que la traza queda en el propio Lakehouse y no solo en estas capturas.
+
 ---
 
 ## Tests
