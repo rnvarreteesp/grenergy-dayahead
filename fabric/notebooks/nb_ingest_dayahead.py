@@ -1,0 +1,277 @@
+# Fabric notebook source
+# Notebook de ingesta Day Ahead para Microsoft Fabric.
+#
+# Importar en el workspace: Data Engineering > Import notebook > este fichero.
+# Debe estar adjunto a un Lakehouse (lh_energy_markets) y se parametriza desde
+# el pipeline pl_dayahead_daily.
+#
+# METADATA ********************
+# META {
+# META   "kernel_info": {"name": "synapse_pyspark"},
+# META   "dependencies": {"lakehouse": {"default_lakehouse_name": "lh_energy_markets"}}
+# META }
+
+# CELL ********************
+
+# --- Parametros del pipeline -------------------------------------------------
+# Marcar esta celda como "Toggle parameter cell" en Fabric para que el pipeline
+# pueda sobrescribir estos valores en cada ejecucion.
+countries = "ES,RO,DE,PL"
+lookback_days = 2      # relee D-2 para tapar huecos y recoger revisiones
+horizon_days = 1       # D+1: la subasta del dia siguiente se publica a las 13:00 CET
+date_from = ""         # opcional "YYYY-MM-DD" para recargas historicas
+date_to = ""
+fail_on_gaps = False
+
+# MARKDOWN ********************
+
+# ## 1. Dependencias y codigo del proyecto
+#
+# El codigo vive en el repo (`src/dayahead`), no en el notebook: asi la misma
+# logica se prueba en local con pytest y se ejecuta en Fabric sin duplicarse.
+#
+# El bootstrap de abajo lo localiza solo, probando tres rutas en orden:
+#
+# 1. **Lakehouse** (`Files/src`) si se ha subido el codigo o si el workspace
+#    esta conectado al repo por Git integration.
+# 2. **Clonado del repositorio publico** de GitHub: no hay que subir nada a
+#    mano, basta con poner la URL en `REPO_URL`.
+# 3. **Config embebida**: si solo falta el YAML, se escribe desde el notebook.
+#
+# Asi el notebook arranca en un workspace recien creado sin ningun paso previo.
+
+# CELL ********************
+
+# --- Origen del codigo -------------------------------------------------------
+REPO_URL = "https://github.com/<TU-USUARIO>/grenergy-dayahead.git"
+REPO_BRANCH = "main"
+
+# CELL ********************
+
+import subprocess, sys, os
+from pathlib import Path
+
+# requests y PyYAML ya vienen en el runtime de Fabric; se fija por si acaso.
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", "PyYAML>=6", "requests>=2.31"], check=False)
+
+LAKEHOUSE_CODE = "/lakehouse/default/Files/src"
+LAKEHOUSE_CONFIG = "/lakehouse/default/Files/config/sources.yaml"
+CLONE_DIR = "/tmp/grenergy-dayahead"
+
+CODE_PATH, CONFIG_PATH = None, None
+
+# 1) Codigo ya presente en el Lakehouse
+if Path(LAKEHOUSE_CODE, "dayahead", "__init__.py").exists():
+    CODE_PATH = LAKEHOUSE_CODE
+    if Path(LAKEHOUSE_CONFIG).exists():
+        CONFIG_PATH = LAKEHOUSE_CONFIG
+    print("Codigo tomado del Lakehouse")
+
+# 2) Clonado del repositorio
+if CODE_PATH is None and "<TU-USUARIO>" not in REPO_URL:
+    subprocess.run(["rm", "-rf", CLONE_DIR], check=False)
+    clone = subprocess.run(
+        ["git", "clone", "--depth", "1", "--branch", REPO_BRANCH, REPO_URL, CLONE_DIR],
+        capture_output=True, text=True)
+    if clone.returncode == 0:
+        CODE_PATH = f"{CLONE_DIR}/src"
+        CONFIG_PATH = f"{CLONE_DIR}/config/sources.yaml"
+        print(f"Codigo clonado de {REPO_URL} ({REPO_BRANCH})")
+    else:
+        print("No se pudo clonar el repositorio:", clone.stderr.strip())
+
+if CODE_PATH is None:
+    raise RuntimeError(
+        "No encuentro el paquete 'dayahead'. Pon la URL de tu repositorio en REPO_URL, "
+        f"o sube la carpeta src/ a {LAKEHOUSE_CODE} desde el explorador del Lakehouse.")
+
+if CODE_PATH not in sys.path:
+    sys.path.insert(0, CODE_PATH)
+
+# CELL ********************
+
+# 3) Config embebida: solo se usa si no se encontro sources.yaml por las rutas
+# anteriores. Duplica el YAML del repo a proposito, para que el notebook pueda
+# ejecutarse aislado; la version buena sigue siendo la del repositorio.
+FALLBACK_CONFIG = """
+defaults:
+  target_currency: EUR
+  http: {timeout_seconds: 60, max_retries: 4, backoff_seconds: 2.0}
+fx:
+  provider: ecb
+  series_url: "https://data-api.ecb.europa.eu/service/data/EXR/D.{currency}.EUR.SP00.A"
+  fill_method: forward
+countries:
+  - {code: ES, name: Espana, enabled: true, connector: entsoe, timezone: Europe/Madrid,
+     resolution: PT15M, currency: EUR, table: dayahead_prices_es,
+     params: {base_url: "https://web-api.tp.entsoe.eu/api", document_type: A44,
+              domain: "10YES-REE------0", contract_market_agreement_type: A01,
+              security_token_env: ENTSOE_SECURITY_TOKEN}}
+  - {code: RO, name: Rumania, enabled: true, connector: entsoe, timezone: Europe/Bucharest,
+     resolution: PT15M, currency: EUR, table: dayahead_prices_ro,
+     params: {base_url: "https://web-api.tp.entsoe.eu/api", document_type: A44,
+              domain: "10YRO-TEL------P", contract_market_agreement_type: A01,
+              security_token_env: ENTSOE_SECURITY_TOKEN}}
+  - {code: DE, name: Alemania, enabled: true, connector: smard, timezone: Europe/Berlin,
+     resolution: PT60M, currency: EUR, table: dayahead_prices_de,
+     params: {index_url: "https://www.smard.de/app/chart_data/{filter}/{region}/index_{resolution}.json",
+              block_url: "https://www.smard.de/app/chart_data/{filter}/{region}/{filter}_{region}_{resolution}_{timestamp}.json",
+              filter: "4169", region: "DE", smard_resolution: hour}}
+  - {code: PL, name: Polonia, enabled: true, connector: pse, timezone: Europe/Warsaw,
+     resolution: PT15M, currency: PLN, table: dayahead_prices_pl,
+     params: {base_url: "https://api.raporty.pse.pl/api/rce-pln", timestamp_marks: interval_end}}
+"""
+
+if CONFIG_PATH is None or not Path(CONFIG_PATH).exists():
+    CONFIG_PATH = "/tmp/sources.yaml"
+    Path(CONFIG_PATH).write_text(FALLBACK_CONFIG, encoding="utf-8")
+    print("Usando la configuracion embebida en el notebook")
+
+print("CODE_PATH  =", CODE_PATH)
+print("CONFIG_PATH =", CONFIG_PATH)
+
+# CELL ********************
+
+import logging
+from datetime import date, timedelta
+
+from dayahead.config import load_config
+from dayahead.connectors import get_connector
+from dayahead.fx import FxRates
+from dayahead.http import HttpClient
+from dayahead.sinks.delta_sink import DeltaSink
+from dayahead.transform import assess, deduplicate
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)-7s %(name)s | %(message)s")
+log = logging.getLogger("fabric.dayahead")
+
+# MARKDOWN ********************
+
+# ## 2. Secretos
+#
+# El token de ENTSO-E NO se escribe en el notebook: se lee de Azure Key Vault a
+# traves de `notebookutils`. En la capacidad Trial, si no hay Key Vault
+# disponible, se puede pasar como parametro seguro del pipeline; el codigo
+# soporta ambas rutas y falla de forma explicita si no encuentra ninguna.
+
+# CELL ********************
+
+import os
+
+def load_entsoe_token() -> str:
+    try:
+        from notebookutils import mssparkutils
+        token = mssparkutils.credentials.getSecret(
+            "https://kv-grenergy-digital.vault.azure.net/", "entsoe-security-token")
+        if token:
+            return token
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Key Vault no disponible (%s); se usa la variable de entorno", exc)
+    token = os.getenv("ENTSOE_SECURITY_TOKEN", "")
+    if not token:
+        raise RuntimeError(
+            "Sin token de ENTSO-E: configura el secreto 'entsoe-security-token' en Key Vault "
+            "o la variable de entorno ENTSOE_SECURITY_TOKEN en el entorno de Spark.")
+    return token
+
+os.environ["ENTSOE_SECURITY_TOKEN"] = load_entsoe_token()
+
+# MARKDOWN ********************
+
+# ## 3. Ventana de ejecucion
+#
+# Por defecto D-2 .. D+1. El solape hacia atras es deliberado: la escritura es
+# un MERGE idempotente, asi que repasar dias ya cargados corrige huecos y
+# revisiones de precio sin duplicar ni una fila.
+
+# CELL ********************
+
+today = date.today()
+start = date.fromisoformat(date_from) if date_from else today - timedelta(days=int(lookback_days))
+end = date.fromisoformat(date_to) if date_to else today + timedelta(days=int(horizon_days))
+log.info("Ventana de ingesta: %s .. %s", start, end)
+
+cfg = load_config(CONFIG_PATH)
+wanted = {c.strip().upper() for c in countries.split(",") if c.strip()}
+selected = [c for c in cfg.countries if c.code.upper() in wanted and c.enabled]
+log.info("Paises: %s", [c.code for c in selected])
+
+# MARKDOWN ********************
+
+# ## 4. Ingesta pais a pais
+#
+# Cada pais se aisla en su propio try: que ENTSO-E este caido no puede impedir
+# que se cargue Alemania. Los fallos se acumulan y se reportan al final para
+# que el pipeline los marque, pero sin abortar la ejecucion completa.
+
+# CELL ********************
+
+http = HttpClient(cfg.http.timeout_seconds, cfg.http.max_retries, cfg.http.backoff_seconds)
+fx = FxRates(cfg.fx, http)
+sink = DeltaSink(spark, schema="dbo")  # noqa: F821  (spark lo inyecta Fabric)
+
+results, failures = [], []
+
+for country in selected:
+    try:
+        log.info("=== %s (%s) ===", country.code, country.connector)
+        fx.load(country.currency, start, end)
+        connector = get_connector(country.connector)(country, http, fx)
+        points = deduplicate(list(connector.fetch(start, end)))
+
+        days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+        quality = assess(points, days, country.resolution, country.timezone, country.code)
+        rows = sink.upsert(country.table, points)
+
+        results.append({
+            "country": country.code,
+            "table": country.table,
+            "rows": rows,
+            "days_incomplete": [str(q.delivery_date) for q in quality if not q.complete],
+            "missing_points": sum(q.missing for q in quality),
+        })
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Fallo la ingesta de %s", country.code)
+        failures.append({"country": country.code, "error": str(exc)})
+
+# MARKDOWN ********************
+
+# ## 5. Registro de ejecucion y salida al pipeline
+#
+# Cada ejecucion deja una fila en `dbo.etl_run_log`: es lo que permite auditar
+# despues "que dias quedaron incompletos y cuando se taparon".
+
+# CELL ********************
+
+import json
+from datetime import datetime, timezone
+
+from pyspark.sql import Row
+
+run_row = Row(
+    run_ts_utc=datetime.now(timezone.utc).replace(tzinfo=None),
+    window_from=start,
+    window_to=end,
+    countries=",".join(c.code for c in selected),
+    total_rows=int(sum(r["rows"] for r in results)),
+    missing_points=int(sum(r["missing_points"] for r in results)),
+    failures=json.dumps(failures, ensure_ascii=False),
+    detail=json.dumps(results, ensure_ascii=False),
+)
+(spark.createDataFrame([run_row])  # noqa: F821
+     .write.format("delta").mode("append").saveAsTable("dbo.etl_run_log"))
+
+summary = {"window": {"from": str(start), "to": str(end)}, "results": results, "failures": failures}
+print(json.dumps(summary, indent=2, ensure_ascii=False))
+
+if failures:
+    raise RuntimeError(f"Ingesta incompleta, fallaron: {[f['country'] for f in failures]}")
+if fail_on_gaps and sum(r["missing_points"] for r in results):
+    raise RuntimeError("Hay dias incompletos y fail_on_gaps=True")
+
+# El pipeline lee este valor de salida para encadenar pasos o alertar.
+try:
+    from notebookutils import mssparkutils
+    mssparkutils.notebook.exit(json.dumps(summary, ensure_ascii=False))
+except Exception:  # noqa: BLE001
+    pass

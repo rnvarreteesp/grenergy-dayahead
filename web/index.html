@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Day Ahead · Comparativa de mercados</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js"></script>
+<style>
+  :root{
+    --bg:#0f1419; --panel:#171e26; --line:#26303c; --fg:#e7edf3; --muted:#8fa3b5;
+    --accent:#39d98a;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--fg)}
+  header{padding:18px 24px;border-bottom:1px solid var(--line);display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+  h1{font-size:18px;margin:0;font-weight:600}
+  header span{color:var(--muted);font-size:13px}
+  main{padding:20px 24px;max-width:1240px;margin:0 auto}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:18px}
+  .controls{display:flex;gap:18px;flex-wrap:wrap;align-items:flex-end}
+  .field{display:flex;flex-direction:column;gap:5px}
+  label{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+  input,select,button{background:#0d1218;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:8px 10px;font:inherit}
+  button{background:var(--accent);color:#07130d;font-weight:600;border:0;cursor:pointer}
+  button:hover{filter:brightness(1.08)}
+  button.ghost{background:transparent;color:var(--fg);border:1px solid var(--line);font-weight:500}
+  .countries{display:flex;gap:14px;flex-wrap:wrap}
+  .chip{display:flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid var(--line);border-radius:20px;cursor:pointer;user-select:none}
+  .chip input{margin:0}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:18px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
+  .card .k{font-size:12px;color:var(--muted)}
+  .card .v{font-size:22px;font-weight:600;margin-top:4px}
+  .card .s{font-size:12px;color:var(--muted);margin-top:2px}
+  table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+  th,td{padding:7px 10px;text-align:right;border-bottom:1px solid var(--line)}
+  th:first-child,td:first-child{text-align:left}
+  th{color:var(--muted);font-weight:500;font-size:12px;text-transform:uppercase}
+  #status{font-size:13px;color:var(--muted);min-height:20px}
+  .err{color:#ff7a6b}
+  .chart-wrap{position:relative;height:420px}
+  .hint{font-size:12px;color:var(--muted);margin-top:8px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Precios Day Ahead · comparativa multi-país</h1>
+  <span>ES · RO · DE · PL — normalizado a UTC y EUR/MWh</span>
+</header>
+
+<main>
+  <div class="panel">
+    <div class="controls">
+      <div class="field">
+        <label for="apikey">API key</label>
+        <input id="apikey" type="password" size="26" placeholder="clave de acceso">
+      </div>
+      <div class="field">
+        <label for="from">Desde</label>
+        <input id="from" type="date">
+      </div>
+      <div class="field">
+        <label for="to">Hasta</label>
+        <input id="to" type="date">
+      </div>
+      <div class="field">
+        <label for="gran">Granularidad</label>
+        <select id="gran">
+          <option value="">Nativa (15 min / 60 min)</option>
+          <option value="PT60M" selected>Horaria (PT60M)</option>
+          <option value="PT15M">Cuartohoraria (PT15M)</option>
+        </select>
+      </div>
+      <button id="load">Cargar</button>
+      <button id="today" class="ghost">Últimos 3 días</button>
+    </div>
+    <div class="countries" id="countries" style="margin-top:14px"></div>
+    <div class="hint">La granularidad horaria promedia los cuatro cuartos de hora de ES/RO/PL para poder
+      compararlos con Alemania, que publica en PT60M.</div>
+    <div id="status" style="margin-top:10px"></div>
+  </div>
+
+  <div class="cards" id="cards"></div>
+
+  <div class="panel">
+    <div class="chart-wrap"><canvas id="chart"></canvas></div>
+  </div>
+
+  <div class="panel">
+    <h2 style="font-size:15px;margin:0 0 10px">Resumen diario · media EUR/MWh</h2>
+    <div style="overflow-x:auto"><table id="stats"><thead></thead><tbody></tbody></table></div>
+  </div>
+</main>
+
+<script>
+const API = "";  // servido por la propia API (evita CORS en local)
+const COLORS = {ES:"#e4572e", RO:"#4f9df7", DE:"#f2c14e", PL:"#a06cd5"};
+const NAMES  = {ES:"España", RO:"Rumanía", DE:"Alemania", PL:"Polonia"};
+let token = null, chart = null;
+
+const $ = id => document.getElementById(id);
+const setStatus = (msg, isErr) => { $("status").textContent = msg; $("status").className = isErr ? "err" : ""; };
+
+function initCountries(){
+  $("countries").innerHTML = Object.keys(COLORS).map(c =>
+    '<label class="chip"><input type="checkbox" value="' + c + '" checked>' +
+    '<span class="dot" style="background:' + COLORS[c] + '"></span>' + NAMES[c] + '</label>').join("");
+}
+
+function defaultDates(){
+  const d = n => new Date(Date.now() + n*86400000).toISOString().slice(0,10);
+  $("from").value = d(-3); $("to").value = d(1);
+}
+
+function selected(){
+  return Array.from(document.querySelectorAll("#countries input:checked")).map(i => i.value);
+}
+
+async function auth(){
+  const key = $("apikey").value.trim();
+  if(!key) throw new Error("Introduce la API key");
+  const r = await fetch(API + "/auth/token", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({api_key:key})
+  });
+  if(!r.ok) throw new Error("API key inválida");
+  token = (await r.json()).access_token;
+  sessionStorage.setItem("da_key", key);
+}
+
+async function get(path){
+  const r = await fetch(API + path, {headers:{Authorization:"Bearer " + token}});
+  if(r.status === 401){ token = null; throw new Error("Sesión caducada, vuelve a pulsar Cargar"); }
+  if(!r.ok) throw new Error("Error " + r.status + ": " + (await r.text()));
+  return r.json();
+}
+
+function drawChart(data){
+  const datasets = Object.entries(data.series)
+    .filter(function(e){ return e[1].length; })
+    .map(function(e){
+      const code = e[0], pts = e[1];
+      return {
+        label: NAMES[code] || code,
+        data: pts.map(p => ({x: p.ts_utc, y: p.price_eur})),
+        borderColor: COLORS[code] || "#888",
+        backgroundColor: "transparent",
+        borderWidth: 1.8, pointRadius: 0, tension: 0.15
+      };
+    });
+  if(chart) chart.destroy();
+  const many = datasets.length && datasets[0].data.length > 300;
+  chart = new Chart($("chart"), {
+    type:"line",
+    data:{datasets:datasets},
+    options:{
+      responsive:true, maintainAspectRatio:false, animation:false,
+      interaction:{mode:"index", intersect:false},
+      scales:{
+        x:{type:"time",
+           time:{unit: many ? "day" : "hour", displayFormats:{hour:"dd/MM HH:mm", day:"dd/MM"}},
+           ticks:{color:"#8fa3b5", maxRotation:0, autoSkipPadding:24},
+           grid:{color:"#20293380"},
+           title:{display:true, text:"Hora UTC", color:"#8fa3b5"}},
+        y:{ticks:{color:"#8fa3b5"}, grid:{color:"#20293380"},
+           title:{display:true, text:"EUR/MWh", color:"#8fa3b5"}}
+      },
+      plugins:{
+        legend:{labels:{color:"#e7edf3", usePointStyle:true, pointStyle:"line"}},
+        tooltip:{callbacks:{label: c => c.dataset.label + ": " + (c.parsed.y == null ? "—" : c.parsed.y.toFixed(2)) + " EUR/MWh"}}
+      }
+    }
+  });
+}
+
+function drawCards(data){
+  const cards = Object.entries(data.series)
+    .filter(e => e[1].length)
+    .map(function(e){
+      const vals = e[1].map(p => p.price_eur).filter(v => v !== null);
+      const avg = vals.reduce((a,b) => a+b, 0) / vals.length;
+      return {code:e[0], avg:avg, min:Math.min.apply(null, vals), max:Math.max.apply(null, vals), n:vals.length};
+    });
+  if(!cards.length){ $("cards").innerHTML = ""; return; }
+  const cheapest = cards.reduce((a,b) => a.avg < b.avg ? a : b);
+  const dearest  = cards.reduce((a,b) => a.avg > b.avg ? a : b);
+  const html = cards.map(c =>
+    '<div class="card"><div class="k"><span class="dot" style="background:' + COLORS[c.code] + '"></span> ' +
+    (NAMES[c.code] || c.code) + '</div><div class="v">' + c.avg.toFixed(2) + '</div>' +
+    '<div class="s">media · mín ' + c.min.toFixed(1) + ' / máx ' + c.max.toFixed(1) + ' · ' + c.n + ' pts</div></div>'
+  ).join("");
+  $("cards").innerHTML = html +
+    '<div class="card"><div class="k">Spread medio</div><div class="v">' +
+    (dearest.avg - cheapest.avg).toFixed(2) + '</div><div class="s">' +
+    NAMES[dearest.code] + " vs " + NAMES[cheapest.code] + '</div></div>';
+}
+
+function drawStats(rows){
+  const codes = Array.from(new Set(rows.map(r => r.country_code))).sort();
+  const dates = Array.from(new Set(rows.map(r => r.delivery_date))).sort();
+  const idx = {};
+  rows.forEach(r => { idx[r.delivery_date + "|" + r.country_code] = r; });
+  $("stats").querySelector("thead").innerHTML =
+    "<tr><th>Fecha</th>" + codes.map(c => "<th>" + (NAMES[c] || c) + "</th>").join("") + "</tr>";
+  $("stats").querySelector("tbody").innerHTML = dates.map(d =>
+    "<tr><td>" + d + "</td>" + codes.map(function(c){
+      const r = idx[d + "|" + c];
+      return "<td>" + (r && r.avg_eur !== null ? r.avg_eur.toFixed(2) : "—") + "</td>";
+    }).join("") + "</tr>").join("");
+}
+
+async function load(){
+  try{
+    setStatus("Cargando…");
+    if(!token) await auth();
+    const codes = selected();
+    if(!codes.length){ setStatus("Selecciona al menos un país", true); return; }
+    const q = "countries=" + codes.join(",") + "&from=" + $("from").value + "&to=" + $("to").value;
+    const gran = $("gran").value ? "&granularity=" + $("gran").value : "";
+    const results = await Promise.all([
+      get("/api/v1/prices?" + q + gran),
+      get("/api/v1/stats/daily?" + q)
+    ]);
+    const prices = results[0], stats = results[1];
+    drawCards(prices); drawChart(prices); drawStats(stats);
+    const n = Object.values(prices.series).reduce((a,b) => a + b.length, 0);
+    setStatus(n + " puntos · granularidad " + prices.granularity + " · precios en " + prices.unit);
+  }catch(e){ setStatus(e.message, true); }
+}
+
+initCountries(); defaultDates();
+$("apikey").value = sessionStorage.getItem("da_key") || "";
+$("load").onclick = load;
+$("today").onclick = function(){ defaultDates(); load(); };
+document.addEventListener("keydown", e => { if(e.key === "Enter") load(); });
+</script>
+</body>
+</html>

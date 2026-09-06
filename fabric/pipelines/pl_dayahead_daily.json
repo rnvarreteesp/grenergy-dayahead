@@ -1,0 +1,102 @@
+{
+  "name": "pl_dayahead_daily",
+  "description": "Ingesta diaria de precios Day Ahead (ES, RO, DE, PL). Se ejecuta a las 14:30 CET, despues de la publicacion de la subasta Day Ahead (13:00 CET) y del fixing del BCE (14:15 CET).",
+  "properties": {
+    "activities": [
+      {
+        "name": "Ingesta Day Ahead",
+        "type": "TridentNotebook",
+        "dependsOn": [],
+        "policy": {
+          "timeout": "0.01:00:00",
+          "retry": 2,
+          "retryIntervalInSeconds": 300,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "notebookId": "<GUID del notebook nb_ingest_dayahead>",
+          "workspaceId": "<GUID del workspace>",
+          "parameters": {
+            "countries": {
+              "value": {
+                "value": "@pipeline().parameters.countries",
+                "type": "Expression"
+              },
+              "type": "string"
+            },
+            "lookback_days": {
+              "value": {
+                "value": "@pipeline().parameters.lookback_days",
+                "type": "Expression"
+              },
+              "type": "int"
+            },
+            "horizon_days": {
+              "value": {
+                "value": "@pipeline().parameters.horizon_days",
+                "type": "Expression"
+              },
+              "type": "int"
+            },
+            "date_from": {
+              "value": {
+                "value": "@pipeline().parameters.date_from",
+                "type": "Expression"
+              },
+              "type": "string"
+            },
+            "date_to": {
+              "value": {
+                "value": "@pipeline().parameters.date_to",
+                "type": "Expression"
+              },
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "Alerta si falla la ingesta",
+        "type": "Office365Outlook",
+        "dependsOn": [
+          {
+            "activity": "Ingesta Day Ahead",
+            "dependencyConditions": ["Failed"]
+          }
+        ],
+        "typeProperties": {
+          "inputs": {
+            "method": "post",
+            "path": "/v2/Mail",
+            "body": {
+              "To": "digital-data@grenergy.eu",
+              "Subject": "[Day Ahead ETL] Fallo en la ingesta diaria",
+              "Body": "@concat('Pipeline pl_dayahead_daily fallo el ', utcNow(), '. Detalle: ', activity('Ingesta Day Ahead').output.error.message)"
+            }
+          }
+        },
+        "comment": "Opcional: requiere la conexion de Outlook en el workspace. Sustituible por Teams o por una alerta de Data Activator."
+      }
+    ],
+    "parameters": {
+      "countries": { "type": "string", "defaultValue": "ES,RO,DE,PL" },
+      "lookback_days": { "type": "int", "defaultValue": 2 },
+      "horizon_days": { "type": "int", "defaultValue": 1 },
+      "date_from": { "type": "string", "defaultValue": "" },
+      "date_to": { "type": "string", "defaultValue": "" }
+    },
+    "annotations": ["dayahead", "energy-markets"]
+  },
+  "schedule": {
+    "comment": "Se configura en la UI: Pipeline > Schedule. Valores usados.",
+    "frequency": "Daily",
+    "times": ["14:30"],
+    "timeZone": "Romance Standard Time",
+    "justificacion": "La subasta Day Ahead de SDAC casa a las 12:00-13:00 CET y el BCE publica el fixing PLN/EUR a las 14:15 CET. Ejecutar a las 14:30 garantiza que estan disponibles tanto los precios de D+1 como el tipo de cambio del dia."
+  },
+  "recarga_historica": {
+    "comment": "Para backfill se ejecuta el pipeline a mano con date_from/date_to. Al ser MERGE idempotente puede repetirse sin duplicar.",
+    "ejemplo": { "date_from": "2026-01-01", "date_to": "2026-06-30", "countries": "ES,RO,DE,PL" }
+  }
+}

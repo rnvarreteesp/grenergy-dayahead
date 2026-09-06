@@ -1,0 +1,83 @@
+# ---------------------------------------------------------------------------
+# Configuracion declarativa de fuentes Day Ahead.
+#
+# Anadir un pais nuevo = anadir un bloque aqui. No se toca el codigo del
+# pipeline salvo que la fuente use un protocolo (connector) que aun no exista.
+# ---------------------------------------------------------------------------
+
+defaults:
+  target_currency: EUR
+  http:
+    timeout_seconds: 60
+    max_retries: 4
+    backoff_seconds: 2.0
+
+fx:
+  # Serie de referencia BCE (PLN por 1 EUR). Ver docs/DECISIONES_TECNICAS.md
+  provider: ecb
+  series_url: "https://data-api.ecb.europa.eu/service/data/EXR/D.{currency}.EUR.SP00.A"
+  # El BCE no publica fines de semana ni festivos TARGET: se arrastra
+  # el ultimo tipo habil publicado (misma convencion que usa el mercado).
+  fill_method: forward
+
+countries:
+
+  - code: ES
+    name: Espana
+    enabled: true
+    connector: entsoe
+    timezone: Europe/Madrid
+    resolution: PT15M
+    currency: EUR
+    table: dayahead_prices_es
+    params:
+      base_url: "https://web-api.tp.entsoe.eu/api"
+      document_type: A44
+      domain: "10YES-REE------0"
+      # A01 = Daily -> subasta diaria (Day Ahead).
+      # Sin este filtro se cuelan las subastas intradiarias (A07).
+      contract_market_agreement_type: A01
+      security_token_env: ENTSOE_SECURITY_TOKEN
+
+  - code: RO
+    name: Rumania
+    enabled: true
+    connector: entsoe
+    timezone: Europe/Bucharest
+    resolution: PT15M
+    currency: EUR
+    table: dayahead_prices_ro
+    params:
+      base_url: "https://web-api.tp.entsoe.eu/api"
+      document_type: A44
+      domain: "10YRO-TEL------P"
+      contract_market_agreement_type: A01
+      security_token_env: ENTSOE_SECURITY_TOKEN
+
+  - code: DE
+    name: Alemania
+    enabled: true
+    connector: smard
+    timezone: Europe/Berlin
+    resolution: PT60M
+    currency: EUR
+    table: dayahead_prices_de
+    params:
+      index_url: "https://www.smard.de/app/chart_data/{filter}/{region}/index_{resolution}.json"
+      block_url: "https://www.smard.de/app/chart_data/{filter}/{region}/{filter}_{region}_{resolution}_{timestamp}.json"
+      filter: "4169"          # Wholesale Electricity Price Day Ahead
+      region: "DE"
+      smard_resolution: hour
+
+  - code: PL
+    name: Polonia
+    enabled: true
+    connector: pse
+    timezone: Europe/Warsaw
+    resolution: PT15M
+    currency: PLN            # requiere conversion a EUR
+    table: dayahead_prices_pl
+    params:
+      base_url: "https://api.raporty.pse.pl/api/rce-pln"
+      # La API marca el FIN del intervalo: se desplaza a inicio de intervalo.
+      timestamp_marks: interval_end
